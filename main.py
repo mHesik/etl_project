@@ -22,22 +22,40 @@ logging.basicConfig(
 def extract():
     logging.info("Началась загрузка данных")
     # константа ссылки
-    url = 'https://dummyjson.com/products'
+
+    limit = 30
+    skip = 0
+
+    all_products = []
     # обработка исключение try except
     try:
-        r = requests.get(url, timeout=5)
+        while True:
+            url = f'https://dummyjson.com/products?limit={limit}&skip={skip}'
 
-        logging.info(f"Статус ответа: {r.status_code}")
-        # если ошибка с кодом статуса
-        if r.status_code == 200:
-            logging.info(f"Получено строк от API: {len(r.json())}")
-            return r.json()
-        else:
-            logging.error(f"Ошибка HTTP: {r.status_code}")
-            return None
+            r = requests.get(url, timeout=5)
 
+            logging.info(f"Статус ответа: {r.status_code}")
 
-        
+            r.raise_for_status()
+
+            data = r.json()
+            products = data["products"]
+
+            logging.info(f"Получено строк от API: {len(r.json()["products"])}, skip={skip}")
+
+            all_products.extend(products)
+
+            skip += limit
+
+            if skip >= data["total"]:
+                break
+
+            logging.info(
+                f"Всего загружено товаров: {len(all_products)}"
+            )
+
+        return all_products
+            
     except requests.exceptions.RequestException:
         logging.error("Произошла ошибка запроса")
         return None
@@ -66,12 +84,24 @@ def save_json(raw_data):
 def read_json():
     # путь в котором лежит сырой json
     file_path = pathlib.Path('data/raw/products.json')
-    # функция with которая читает и загружаета данные из файла
-    with file_path.open('r', encoding='utf-8') as file:
-        raw_data = json.load(file)
 
-    return raw_data
+    try:
+        file = file_path.read_text(encoding="utf-8")
+        logging.info("JSON Файл найден")
+        # функция with которая читает и загружаета данные из файла
+        with file_path.open('r', encoding='utf-8') as file:
+            raw_data = json.load(file)
+    
+        return raw_data
+    
+    except FileNotFoundError:
+        logging.error("JSON Файл отсутствует!")
+        return None
 
+    except json.JSONDecodeError:
+        logging.error("JSON Файл повреждён!")
+        return None
+    
 def make_summary(df):
     summary = (
         df.groupby('категория')
@@ -100,73 +130,89 @@ def save_csv(df, filename):
         logging.error("Датафрейм пустой")
 
 # Функция обработки данных
-def transform(raw_data):
+def transform(all_products):
     logging.info("Обработка данных началась")
     
-    if raw_data is None:
+    if all_products is None:
         return None
 
     # Нормализация Json
-    df = pd.json_normalize(raw_data["products"])
+    df = pd.json_normalize(all_products)
 
-    df["brand"] = df["brand"].fillna("Не указан")
+    if df["id"].duplicated().any():
+                logging.error("Обнаружены дубликаты id")
+                return None
 
+    #Проверка на обязательные поля
+    required_columns = {"title", "category", "price"}
 
-    # Убрать не нужный столбец
-    df = df.drop(columns=[
-        'meta.qrCode',
-        'reviews',
-        'images',
-        'thumbnail',
-        'meta.barcode',
-        'tags',
-        'sku',
-        'warrantyInformation',
-        'shippingInformation',
-        'returnPolicy',
-        'dimensions.width',
-        "dimensions.height",
-        "dimensions.depth",
-        'minimumOrderQuantity',
-        "meta.createdAt",
-        "meta.updatedAt"                   
-    ])
+    missing_columns = required_columns - set(df.columns)
 
-    # Переименовать столбцы
-    df = df.rename(columns={
-        'title': 'название',
-        'description': 'описание',
-        'category': 'категория',
-        'price': 'цена',
-        'discountPercentage': 'процент_скидки',
-        'rating': "рейтинг",
-        "stock": "количество",
-        "brand": "бренд",
-        "weight": "вес",
-        "availabilityStatus": "статус_остатка"
-    })
-
-    # указать типы данных явно
-    df = df.astype({
-        "id": "int64",
-        "цена": "float64",
-        "процент_скидки": "float64",
-        "рейтинг": "float64",
-        "количество": "int64",
-        "вес": "int64",
-        "название": "string",
-        "описание": "string",
-        "категория": "string",
-        "бренд": "string",
-        "статус_остатка": "string"
-    })
-
-    logging.info(f"Осталось строк после обработки {len(df)}")
-    logging.info(f"\nТипы данных\n{df.dtypes}")
-
-    # Преобразование данных в строки, если данные были списками или словарями
-    df = df.map(lambda x: json.dumps(x) if isinstance(x, (list, dict)) else x)
-    return df
+    if missing_columns:
+        logging.error(f"Ошибка отсутствуют обязательные поля: {missing_columns}")
+        return None
+    else:
+        logging.info("Все обязательные поля на месте")
+        #Если ничего нет, то есть  Null ставим Не указан
+        df["brand"] = df["brand"].fillna("Не указан")
+    
+    
+        # Убрать не нужный столбец
+        df = df.drop(columns=[
+            'meta.qrCode',
+            'reviews',
+            'images',
+            'thumbnail',
+            'meta.barcode',
+            'tags',
+            'sku',
+            'warrantyInformation',
+            'shippingInformation',
+            'returnPolicy',
+            'dimensions.width',
+            "dimensions.height",
+            "dimensions.depth",
+            'minimumOrderQuantity',
+            "meta.createdAt",
+            "meta.updatedAt"                   
+        ])
+    
+        # Переименовать столбцы
+        df = df.rename(columns={
+            'title': 'название',
+            'description': 'описание',
+            'category': 'категория',
+            'price': 'цена',
+            'discountPercentage': 'процент_скидки',
+            'rating': "рейтинг",
+            "stock": "количество",
+            "brand": "бренд",
+            "weight": "вес",
+            "availabilityStatus": "статус_остатка"
+        })
+    
+        # указать типы данных явно
+        df = df.astype({
+            "id": "int64",
+            "цена": "float64",
+            "процент_скидки": "float64",
+            "рейтинг": "float64",
+            "количество": "int64",
+            "вес": "int64",
+            "название": "string",
+            "описание": "string",
+            "категория": "string",
+            "бренд": "string",
+            "статус_остатка": "string"
+        })
+    
+        logging.info(f"Осталось строк после обработки {len(df)}")
+        logging.info(f"\nТипы данных\n{df.dtypes}")
+    
+        # Преобразование данных в строки, если данные были списками или словарями
+        # df = df.map(lambda x: json.dumps(x) if isinstance(x, (list, dict)) else x)
+        return df
+    
 
 
 # Функция заливки данных в SQL
@@ -174,14 +220,36 @@ def load(df):
     proc_folder = pathlib.Path("data/processed")
     proc_folder.mkdir(parents=True, exist_ok=True)
     file_path = proc_folder / 'my_db.db'
-    # Подключение к бд, если нет то создание
-    conn = sqlite3.connect(file_path)
 
-    # создать таблицу, если данне есть заменить
-    df.to_sql('products', conn, if_exists='replace', index=False)
-    # отключиться от бдшки
-    conn.close()
-    logging.info("Данные успешно сохранены в SQLite")
+    # Подключение к бд, если нет то создание
+    with sqlite3.connect(file_path) as conn:
+
+        cursor = conn.cursor()
+        rows = list(df.itertuples(index=False, name=None))
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS products(
+                id    INTEGER PRIMARY KEY,
+                название             TEXT,
+                описание             TEXT,
+                категория            TEXT,
+                цена                 REAL,
+                процент_скидки       REAL,
+                рейтинг              REAL,
+                количество        INTEGER,
+                бренд                TEXT,
+                вес               INTEGER,
+                статус_остатка       TEXT
+            )
+''')
+
+        cursor.execute("DELETE FROM products")
+
+        cursor.executemany("INSERT INTO products (id, название, описание, категория, цена, процент_скидки, рейтинг, количество, бренд, вес, статус_остатка) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                           rows
+                           )
+
+
+        logging.info("Данные успешно сохранены в SQLite")
 
 
 # Основная функция которая вызывает все остальное
